@@ -69,6 +69,40 @@ function save() {
 let db = load();
 const ui = { tab: 'game', picked: null, newName: '' };
 
+/* ---------- Instellingen en scherm aanhouden ---------- */
+// Instellingen staan in dezelfde opslag, dus ze zitten ook in de back-up.
+// Oudere data zonder instellingen krijgt de standaardwaarden.
+const settings = () => {
+  if (!db.settings) db.settings = { keepAwake: true };
+  return db.settings;
+};
+
+let wakeLock = null;
+let wakeLockPending = false;
+
+/** Houdt het scherm aan zolang er een potje open staat (en de schakelaar aan is). */
+async function syncWakeLock() {
+  if (!('wakeLock' in navigator)) return;
+  const want = settings().keepAwake && !!openGame() && document.visibilityState === 'visible';
+  if (want && !wakeLock && !wakeLockPending) {
+    wakeLockPending = true;
+    try {
+      wakeLock = await navigator.wakeLock.request('screen');
+      // Android geeft de blokkade vrij zodra de app naar de achtergrond gaat; dan opnieuw aanvragen bij terugkomst.
+      wakeLock.addEventListener('release', () => { wakeLock = null; });
+    } catch (e) {
+      wakeLock = null; // bijvoorbeeld energiebesparing aan: dan gaat het scherm gewoon uit
+    } finally {
+      wakeLockPending = false;
+    }
+  } else if (!want && wakeLock) {
+    wakeLock.release().catch(() => {});
+    wakeLock = null;
+  }
+}
+
+document.addEventListener('visibilitychange', syncWakeLock);
+
 /* ---------- Domeinlogica ---------- */
 const playerName = (id) => (db.players.find((p) => p.id === id) || { name: '?' }).name;
 const openGame = () => db.games.find((g) => !g.end);
@@ -284,8 +318,21 @@ function viewHistory() {
 
 function viewMore() {
   const events = db.games.reduce((n, g) => n + g.events.length, 0);
+  const awake = settings().keepAwake;
+  const awakeNote = 'wakeLock' in navigator
+    ? 'Het scherm gaat niet uit zolang er een potje bezig is. Kost wat extra batterij.'
+    : 'Deze browser ondersteunt dit niet; het scherm gaat gewoon uit volgens je telefooninstellingen.';
   return `
     <h1>Meer</h1>
+    <section class="card">
+      <div class="switch-row">
+        <div>
+          <h3>Scherm aanhouden</h3>
+          <p class="muted">${awakeNote}</p>
+        </div>
+        <button class="switch ${awake ? 'on' : ''}" role="switch" aria-checked="${awake}" aria-label="Scherm aanhouden" data-a="toggle-awake"><i></i></button>
+      </div>
+    </section>
     <section class="card">
       <h3>Back-up</h3>
       <p class="muted">Alles staat alleen op deze telefoon. Maak af en toe een back-up, dan raak je niets kwijt als je browsergegevens wist.</p>
@@ -308,6 +355,7 @@ function render() {
     b.classList.toggle('on', b.dataset.tab === ui.tab);
     b.setAttribute('aria-current', b.dataset.tab === ui.tab ? 'page' : 'false');
   });
+  syncWakeLock();
 }
 
 /* ---------- Sheets (pop-ups onderin) ---------- */
@@ -553,6 +601,12 @@ const actions = {
     render();
   },
 
+  'toggle-awake'() {
+    settings().keepAwake = !settings().keepAwake;
+    save();
+    render();
+  },
+
   export: exportData,
   import() { $('#import-file').click(); },
 
@@ -573,7 +627,7 @@ const actions = {
   },
 
   'reset-confirm'() {
-    db = { v: 1, players: [], games: [] };
+    db = { v: 1, players: [], games: [], settings: settings() };
     ui.picked = null;
     save();
     closeSheet();

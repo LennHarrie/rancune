@@ -158,6 +158,20 @@ input[type=text]:focus { outline: 2px solid var(--commander); border-color: tran
 .btns > button { flex: 1; }
 .btns.col { flex-direction: column; }
 
+.switch-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.switch-row p { margin: 0; font-size: .9rem; }
+.switch {
+  flex: none; position: relative; width: 56px; min-height: 32px; height: 32px; padding: 0;
+  border-radius: 999px; background: var(--card2); border: 1px solid var(--line);
+  transition: background .15s;
+}
+.switch i {
+  position: absolute; top: 3px; left: 3px; width: 24px; height: 24px; border-radius: 50%;
+  background: var(--muted); transition: transform .15s, background .15s;
+}
+.switch.on { background: var(--accent); border-color: var(--accent); }
+.switch.on i { transform: translateX(24px); background: #fff; }
+
 /* ---------- Tabbalk ---------- */
 #tabs {
   position: fixed; left: 0; right: 0; bottom: 0;
