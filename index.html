@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="nl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#14111f">
+  <meta name="description" content="Houd bij wie jou het meest schade doet in Magic: Commander.">
+  <title>Rancune Counter</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/icon-192.png">
+  <link rel="apple-touch-icon" href="icons/icon-192.png">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main id="view"></main>
+
+  <nav id="tabs" aria-label="Hoofdmenu">
+    <button data-a="tab" data-tab="game"><span class="ico">⚔️</span>Spel</button>
+    <button data-a="tab" data-tab="rancune"><span class="ico">🔥</span>Rancune</button>
+    <button data-a="tab" data-tab="history"><span class="ico">📜</span>Historie</button>
+    <button data-a="tab" data-tab="more"><span class="ico">⚙️</span>Meer</button>
+  </nav>
+
+  <div id="sheet-root"></div>
+  <div id="toast" role="status" aria-live="polite"></div>
+  <input type="file" id="import-file" accept=".json,application/json" hidden>
+
+  <script src="app.js"></script>
+</body>
+</html>
