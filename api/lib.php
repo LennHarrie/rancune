@@ -179,7 +179,7 @@ function currentSession(): ?array
         return null;
     }
     $st = db()->prepare(
-        'SELECT s.user_id, s.expires_at, u.name
+        'SELECT s.user_id, s.expires_at, u.name, u.role
            FROM rancune_sessions s JOIN users u ON u.id = s.user_id
           WHERE s.token_hash = ? AND s.expires_at > ?'
     );
@@ -188,6 +188,7 @@ function currentSession(): ?array
     return $row ? [
         'user_id'    => (int) $row['user_id'],
         'name'       => (string) $row['name'],
+        'role'       => (string) $row['role'],
         'expires_at' => (int) $row['expires_at'],
     ] : null;
 }
@@ -242,6 +243,49 @@ function validTime(mixed $v): bool
     return is_int($v) && $v >= 0 && $v < 32503680000000; // t/m het jaar 3000, in milliseconden
 }
 
+/** Schade is een heel getal, of een half getal (de admin-grap deelt door 2). */
+function validAmount(mixed $v): bool
+{
+    return (is_int($v) || is_float($v)) && $v >= 0.5 && $v <= 10000 && fmod($v * 2, 1.0) === 0.0;
+}
+
+/**
+ * De grap van beheerders. Geeft terug welke namen (voor deze gebruiker) maar half tellen, en voor
+ * een beheerder ook de eigen instelling. Ontbreekt de tabel nog, dan is er gewoon geen grap.
+ */
+function prankInfo(int $userId, string $role): array
+{
+    $info = ['names' => [], 'mine' => null];
+    try {
+        $st = db()->prepare(
+            "SELECT p.names FROM rancune_prank p JOIN users u ON u.id = p.user_id
+              WHERE p.enabled = 1 AND u.role = 'admin' AND p.user_id <> ?"
+        );
+        $st->execute([$userId]);
+        foreach ($st->fetchAll() as $row) {
+            foreach ((array) json_decode($row['names'], true) as $name) {
+                if (is_string($name) && $name !== '') {
+                    $info['names'][] = mb_strtolower(trim($name));
+                }
+            }
+        }
+        $info['names'] = array_values(array_unique($info['names']));
+
+        if ($role === 'admin') {
+            $st = db()->prepare('SELECT enabled, names FROM rancune_prank WHERE user_id = ?');
+            $st->execute([$userId]);
+            $row = $st->fetch();
+            $info['mine'] = [
+                'enabled' => $row ? (bool) $row['enabled'] : false,
+                'names'   => $row ? array_values((array) json_decode($row['names'], true)) : [],
+            ];
+        }
+    } catch (PDOException $e) {
+        error_log('rancune prank: ' . $e->getMessage());
+    }
+    return $info;
+}
+
 function cleanPlayer(mixed $p): array
 {
     if (!is_array($p) || !validId($p['id'] ?? null) || !is_string($p['name'] ?? null)) {
@@ -281,10 +325,11 @@ function cleanGame(mixed $g): array
     foreach ($events as $e) {
         if (!is_array($e) || !validId($e['id'] ?? null) || !validId($e['p'] ?? null) || !validTime($e['t'] ?? null)
             || !in_array($e['type'] ?? null, TYPES, true)
-            || !is_int($e['n'] ?? null) || $e['n'] < 1 || $e['n'] > 10000) {
+            || !validAmount($e['n'] ?? null)) {
             fail(400, 'Ongeldig potje (schade).');
         }
-        $cleanEvents[] = ['id' => $e['id'], 't' => $e['t'], 'p' => $e['p'], 'type' => $e['type'], 'n' => $e['n']];
+        $n = $e['n'] == floor($e['n']) ? (int) $e['n'] : (float) $e['n'];
+        $cleanEvents[] = ['id' => $e['id'], 't' => $e['t'], 'p' => $e['p'], 'type' => $e['type'], 'n' => $n];
     }
     return [
         'id'        => $g['id'],

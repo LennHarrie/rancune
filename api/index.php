@@ -14,7 +14,7 @@ try {
             requireMethod('GET');
             $s = requireSession();
             respond(200, [
-                'user'      => ['id' => $s['user_id'], 'name' => $s['name']],
+                'user'      => ['id' => $s['user_id'], 'name' => $s['name'], 'role' => $s['role']],
                 'expiresAt' => $s['expires_at'],
             ]);
 
@@ -34,7 +34,11 @@ try {
 
         case 'data':
             requireMethod('GET');
-            sendData(requireSession()['user_id']);
+            sendData(requireSession());
+
+        case 'prank':
+            requireMethod('POST');
+            savePrank(requireSession(), readJson());
 
         case 'sync':
             requireMethod('POST');
@@ -57,7 +61,7 @@ function health(): never
         $pdo = db();
         $stage = 'tabel users van het toernooi';
         $pdo->query('SELECT 1 FROM users LIMIT 1');
-        foreach (['rancune_sessions', 'rancune_players', 'rancune_games', 'rancune_attempts'] as $table) {
+        foreach (['rancune_sessions', 'rancune_players', 'rancune_games', 'rancune_attempts', 'rancune_prank'] as $table) {
             $stage = "tabel $table (api/schema.sql)";
             $pdo->query("SELECT 1 FROM $table LIMIT 1");
         }
@@ -107,16 +111,18 @@ function login(array $in): never
     clearAttempts('login_user', $who);
     clearAttempts('login_ip', $ip);
     $expires = startSession((int) $user['id']);
-    $s = db()->prepare('SELECT name FROM users WHERE id = ?');
+    $s = db()->prepare('SELECT name, role FROM users WHERE id = ?');
     $s->execute([$user['id']]);
+    $profile = $s->fetch();
     respond(200, [
-        'user'      => ['id' => (int) $user['id'], 'name' => (string) $s->fetchColumn()],
+        'user'      => ['id' => (int) $user['id'], 'name' => (string) $profile['name'], 'role' => (string) $profile['role']],
         'expiresAt' => $expires,
     ]);
 }
 
-function sendData(int $userId): never
+function sendData(array $session): never
 {
+    $userId = $session['user_id'];
     $st = db()->prepare('SELECT id, name FROM rancune_players WHERE user_id = ? ORDER BY n');
     $st->execute([$userId]);
     $players = $st->fetchAll();
@@ -125,7 +131,43 @@ function sendData(int $userId): never
     $st->execute([$userId]);
     $games = array_map(fn ($row) => json_decode($row['data'], true), $st->fetchAll());
 
-    respond(200, ['players' => $players, 'games' => $games]);
+    respond(200, ['players' => $players, 'games' => $games, 'prank' => prankInfo($userId, $session['role'])]);
+}
+
+/** Beheerders zetten hier de grap aan of uit; voor andere rollen is deze actie gesloten. */
+function savePrank(array $session, array $in): never
+{
+    if ($session['role'] !== 'admin') {
+        fail(403, 'Niet toegestaan.');
+    }
+    $enabled = (bool) ($in['enabled'] ?? false);
+    $raw = $in['names'] ?? [];
+    if (!is_array($raw) || count($raw) > 5) {
+        fail(400, 'Maximaal 5 namen.');
+    }
+    $names = [];
+    foreach ($raw as $name) {
+        if (!is_string($name)) {
+            fail(400, 'Ongeldige naam.');
+        }
+        $name = trim((string) preg_replace('/\s+/u', ' ', $name));
+        if ($name === '') {
+            continue;
+        }
+        if (mb_strlen($name) > 24) {
+            fail(400, 'Een naam is maximaal 24 tekens.');
+        }
+        $names[] = $name;
+    }
+    $names = array_values(array_unique($names));
+    if ($enabled && !$names) {
+        fail(400, 'Vul minstens één naam in.');
+    }
+    db()->prepare(
+        'INSERT INTO rancune_prank (user_id, enabled, names, updated_at) VALUES (?, ?, ?, ?)
+         ON DUPLICATE KEY UPDATE enabled = VALUES(enabled), names = VALUES(names), updated_at = VALUES(updated_at)'
+    )->execute([$session['user_id'], $enabled ? 1 : 0, json_encode($names, JSON_UNESCAPED_UNICODE), time()]);
+    respond(200, ['mine' => ['enabled' => $enabled, 'names' => $names]]);
 }
 
 /** Verwerkt een batch wijzigingen van de app: nieuwe/gewijzigde spelers en potjes, en verwijderingen. */

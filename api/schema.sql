@@ -46,3 +46,13 @@ CREATE TABLE IF NOT EXISTS rancune_attempts (
   at   INT UNSIGNED    NOT NULL,
   KEY idx_lookup (kind, k, at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+-- De "grap" van een beheerder: schade die iemand anders registreert voor een van de opgegeven
+-- namen telt maar half. Alleen accounts met rol admin mogen dit zetten (dat wordt in de API afgedwongen).
+CREATE TABLE IF NOT EXISTS rancune_prank (
+  user_id    INT          NOT NULL PRIMARY KEY,
+  enabled    TINYINT(1)   NOT NULL DEFAULT 0,
+  names      VARCHAR(500) NOT NULL DEFAULT '[]',
+  updated_at INT UNSIGNED NOT NULL,
+  CONSTRAINT fk_rancune_prank_user FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;

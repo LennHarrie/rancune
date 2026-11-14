@@ -38,6 +38,8 @@ const typeOf = (id) => TYPES.find((t) => t.id === id);
 const fmtDate = (t) => new Date(t).toLocaleDateString('nl-NL', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' });
 const fmtTime = (t) => new Date(t).toLocaleTimeString('nl-NL', { hour: '2-digit', minute: '2-digit' });
 const levelOf = (score) => LEVELS.find(([min]) => score >= min)[1];
+// Gedeelde schade geeft halve getallen: die tonen we met een komma, hele getallen zonder.
+const fmtNum = (n) => (Number.isInteger(n) ? String(n) : n.toFixed(1).replace('.', ','));
 
 /* ---------- Opslag ---------- */
 function isValid(d) {
@@ -67,10 +69,15 @@ const LS = {
   settings: 'rancune.settings',
   data: (uid) => `rancune.data.${uid}`,
   pending: (uid) => `rancune.pending.${uid}`,
+  prank: (uid) => `rancune.prank.${uid}`,
 };
 
 let db = { players: [], games: [] };
 const ui = { tab: 'game', picked: null, newName: '', sync: 'idle', syncMsg: '', authUser: '' };
+
+// De admin-grap: namen (kleine letters) waarvan de schade door 2 gedeeld wordt, en voor een admin
+// de eigen instelling. Komt van de server en wordt bewaard zodat het ook offline werkt.
+let prank = { names: [], mine: null };
 
 /* ---------- Instellingen en scherm aanhouden ---------- */
 // Voorkeuren van dit toestel; ze horen niet bij het account en gaan dus niet online.
@@ -133,6 +140,9 @@ function addPlayer(name) {
   return p;
 }
 
+/** Telt de schade van deze tegenstander maar half (admin-grap)? */
+const prankApplies = (pid) => prank.names.includes(playerName(pid).trim().toLowerCase());
+
 function addDamage(g, pid, type, n) {
   const last = g.events[g.events.length - 1];
   // Opeenvolgende tikken op dezelfde knop vloeien samen tot één regel in de tijdlijn.
@@ -143,12 +153,12 @@ function addDamage(g, pid, type, n) {
   }
 }
 
-function removeDamage(g, pid, type) {
+function removeDamage(g, pid, type, step = 1) {
   for (let i = g.events.length - 1; i >= 0; i--) {
     const e = g.events[i];
     if (e.p === pid && e.type === type) {
-      e.n -= 1;
-      if (e.n <= 0) g.events.splice(i, 1);
+      e.n -= step;
+      if (e.n <= 0.0001) g.events.splice(i, 1);
       return;
     }
   }
@@ -323,6 +333,20 @@ async function doFlush() {
   if (pendingCount()) flushAgain = true;
 }
 
+const cleanNames = (v) => (Array.isArray(v) ? v.filter((x) => typeof x === 'string') : []);
+
+function normalizePrank(p) {
+  if (!p || typeof p !== 'object') return { names: [], mine: null };
+  const mine = p.mine && typeof p.mine === 'object'
+    ? { enabled: !!p.mine.enabled, names: cleanNames(p.mine.names) } : null;
+  return { names: cleanNames(p.names), mine };
+}
+
+function setPrank(p) {
+  prank = normalizePrank(p);
+  if (auth.user) lsSet(LS.prank(auth.user.id), prank);
+}
+
 /** Voegt de serverlijst en de lokale, nog niet verstuurde wijzigingen samen (lokaal wint). */
 function mergeList(serverList, localList, pend, dels) {
   const out = serverList.filter((x) => !dels.includes(x.id));
@@ -345,6 +369,7 @@ async function pull() {
     return;
   }
   lastPull = Date.now();
+  setPrank(res.data.prank);
   db = {
     players: mergeList(res.data.players, db.players, pending.players, pending.delPlayers),
     games: mergeList(res.data.games, db.games, pending.games, pending.delGames).sort((a, b) => a.start - b.start),
@@ -384,6 +409,7 @@ async function enterSession(user, expiresAt, { offline = false } = {}) {
   const cached = lsGet(LS.data(user.id));
   db = cached && isValid(cached) ? { players: cached.players, games: cached.games } : { players: [], games: [] };
   pending = loadPending(user.id);
+  prank = normalizePrank(lsGet(LS.prank(user.id)));
   rebuildSnapshot();
   ui.picked = null;
   ui.sync = offline ? 'offline' : 'idle';
@@ -425,6 +451,8 @@ async function logout() {
   }
   const uid = auth.user && auth.user.id;
   lsDel(LS.last);
+  if (uid) lsDel(LS.prank(uid));
+  prank = { names: [], mine: null };
   // Wijzigingen die nog niet online staan blijven bewaard tot dit account weer inlogt.
   if (uid && !pendingCount()) { lsDel(LS.data(uid)); lsDel(LS.pending(uid)); }
   auth.user = null;
@@ -434,7 +462,7 @@ async function logout() {
   db = { players: [], games: [] };
   pending = emptyPending();
   snapshot = new Map();
-  Object.assign(ui, { tab: 'game', picked: null, newName: '', sync: 'idle', syncMsg: '' });
+  Object.assign(ui, { tab: 'game', picked: null, newName: '', sync: 'idle', syncMsg: '', prankNames: undefined });
   closeSheet();
   render();
 }
@@ -512,6 +540,8 @@ function viewActiveGame(g) {
     const t = totals[pid];
     const tags = (pid === f ? '<span class="tag first">Eerste klap</span>' : '')
       + (pid === l ? '<span class="tag last">Laatste klap</span>' : '');
+    const half = prankApplies(pid);
+    const d = half ? 2 : 1;
     const rows = TYPES.map((type) => {
       const v = t[type.id];
       const lethal = type.lethal && v >= type.lethal;
@@ -519,14 +549,18 @@ function viewActiveGame(g) {
         <div class="row t-${type.id}">
           <span class="lbl">${type.label}</span>
           <button class="step" data-a="dec" data-p="${pid}" data-t="${type.id}" aria-label="Eén ${type.label} minder" ${v ? '' : 'disabled'}>−</button>
-          <output class="num ${lethal ? 'lethal' : ''}">${v}${type.lethal ? `<small>/${type.lethal}</small>` : ''}</output>
-          <button class="step plus" data-a="inc" data-n="1" data-p="${pid}" data-t="${type.id}" aria-label="${type.label} +1">+1</button>
-          <button class="step plus" data-a="inc" data-n="5" data-p="${pid}" data-t="${type.id}" aria-label="${type.label} +5">+5</button>
+          <output class="num ${lethal ? 'lethal' : ''}">${fmtNum(v)}${type.lethal ? `<small>/${type.lethal}</small>` : ''}</output>
+          <button class="step plus" data-a="inc" data-n="1" data-p="${pid}" data-t="${type.id}" aria-label="${type.label} +${fmtNum(1 / d)}">+${fmtNum(1 / d)}</button>
+          <button class="step plus" data-a="inc" data-n="5" data-p="${pid}" data-t="${type.id}" aria-label="${type.label} +${fmtNum(5 / d)}">+${fmtNum(5 / d)}</button>
         </div>`;
     }).join('');
+    const rule = half
+      ? `<p class="prank-note">⚖️ <b>Admin-regel:</b> alle schade van ${esc(playerName(pid))} wordt door 2 gedeeld.</p>`
+      : '';
     return `
-      <section class="card opp">
+      <section class="card opp ${half ? 'prank' : ''}">
         <header><h3>${esc(playerName(pid))}</h3><span class="tags">${tags}</span></header>
+        ${rule}
         ${rows}
       </section>`;
   }).join('');
@@ -606,11 +640,36 @@ function viewHistory() {
       <button class="card hist" data-a="game" data-id="${g.id}">
         <div class="hist-head"><b>${fmtDate(g.start)}</b>${badge}</div>
         <small class="muted">${g.opponents.map((id) => esc(playerName(id))).join(', ')}</small>
-        <small>Ontvangen: ${s.dmg} schade${s.toxic ? ` · ${s.toxic} toxic` : ''}</small>
+        <small>Ontvangen: ${fmtNum(s.dmg)} schade${s.toxic ? ` · ${fmtNum(s.toxic)} toxic` : ''}</small>
         <small class="muted">Eerste: ${f ? esc(playerName(f)) : '–'} · Laatste: ${l ? esc(playerName(l)) : '–'}</small>
       </button>`;
   }).join('');
   return `<h1>Historie</h1>${items}`;
+}
+
+/** De grap-instelling: alleen zichtbaar voor beheerders (de server dwingt dit ook af). */
+function viewPrankCard() {
+  if (!auth.user || auth.user.role !== 'admin') return '';
+  const mine = prank.mine || { enabled: false, names: [] };
+  const draft = ui.prankNames !== undefined ? ui.prankNames
+    : (mine.names.length ? mine.names.join(', ') : auth.user.name.split(' ')[0]);
+  return `
+    <section class="card prank-card">
+      <div class="switch-row">
+        <div>
+          <h3>Grap: schade door 2</h3>
+          <p class="muted">Zolang dit aan staat telt schade die anderen voor jou invoeren maar half, en zien ze dat heel duidelijk. Alleen beheerders zien dit.</p>
+        </div>
+        <button class="switch ${mine.enabled ? 'on' : ''}" role="switch" aria-checked="${mine.enabled}" aria-label="Grap aan of uit" data-a="prank-toggle"><i></i></button>
+      </div>
+      <label class="field">Zo noemen anderen jou (gescheiden door komma's)
+        <input id="prank-names" type="text" maxlength="120" autocomplete="off" value="${esc(draft)}">
+      </label>
+      <div class="btns"><button data-a="prank-save">Namen opslaan</button></div>
+      <p class="muted">${mine.enabled
+    ? `Staat <b>aan</b> voor: ${mine.names.map(esc).join(', ')}`
+    : 'Staat uit.'}</p>
+    </section>`;
 }
 
 function viewMore() {
@@ -633,6 +692,7 @@ function viewMore() {
       <p class="muted">Je sessie verloopt ${until}. ${syncLine}${n ? ` (${n} wijziging${n === 1 ? '' : 'en'} wachten)` : ''}</p>
       <button data-a="logout">Uitloggen</button>
     </section>
+    ${viewPrankCard()}
     <section class="card">
       <div class="switch-row">
         <div>
@@ -701,14 +761,14 @@ function sheetPlayer(id) {
     <div class="big">${st.score}<small>rancune-score</small></div>
     <dl class="grid">
       <div><dt>Potjes samen</dt><dd>${st.games}</dd></div>
-      <div><dt>Gewone schade</dt><dd>${st.normal}</dd></div>
-      <div><dt>Commander-schade</dt><dd>${st.commander}</dd></div>
-      <div><dt>Toxic-tellers</dt><dd>${st.toxic}</dd></div>
+      <div><dt>Gewone schade</dt><dd>${fmtNum(st.normal)}</dd></div>
+      <div><dt>Commander-schade</dt><dd>${fmtNum(st.commander)}</dd></div>
+      <div><dt>Toxic-tellers</dt><dd>${fmtNum(st.toxic)}</dd></div>
       <div><dt>Eerste klap</dt><dd>${st.first}× <small>${pct(st.first)}</small></dd></div>
       <div><dt>Laatste klap</dt><dd>${st.last}× <small>${pct(st.last)}</small></dd></div>
     </dl>
-    <p class="muted calc">${st.normal}×${WEIGHT.normal} + ${st.commander}×${WEIGHT.commander} + ${st.toxic}×${WEIGHT.toxic}
-      + ${st.first}×${WEIGHT.first} + ${st.last}×${WEIGHT.last} = ${st.points} punten ÷ ${st.games} potjes</p>
+    <p class="muted calc">${fmtNum(st.normal)}×${WEIGHT.normal} + ${fmtNum(st.commander)}×${WEIGHT.commander} + ${fmtNum(st.toxic)}×${WEIGHT.toxic}
+      + ${st.first}×${WEIGHT.first} + ${st.last}×${WEIGHT.last} = ${fmtNum(st.points)} punten ÷ ${st.games} potjes</p>
     <div class="btns">
       <button data-a="rename" data-id="${id}">Naam wijzigen</button>
       <button data-a="close-sheet">Sluiten</button>
@@ -723,12 +783,12 @@ function sheetGame(id) {
   const l = lastHit(g);
   const table = g.opponents.map((pid) => {
     const t = totals[pid];
-    return `<tr><td>${esc(playerName(pid))}</td><td>${t.normal}</td><td>${t.commander}</td><td>${t.toxic}</td></tr>`;
+    return `<tr><td>${esc(playerName(pid))}</td><td>${fmtNum(t.normal)}</td><td>${fmtNum(t.commander)}</td><td>${fmtNum(t.toxic)}</td></tr>`;
   }).join('');
   const timeline = g.events.length
     ? g.events.map((e) => `
         <li class="t-${e.type}"><time>${fmtTime(e.t)}</time>
-        <span>${esc(playerName(e.p))}</span><b>${typeOf(e.type).label} ${e.n}</b></li>`).join('')
+        <span>${esc(playerName(e.p))}</span><b>${typeOf(e.type).label} ${fmtNum(e.n)}</b></li>`).join('')
     : '<li class="muted">Geen schade ontvangen.</li>';
   openSheet(`
     <h2>${fmtDate(g.start)}</h2>
@@ -801,7 +861,34 @@ function importData(file) {
 }
 
 /* ---------- Acties ---------- */
+const parseNames = (s) => s.split(',').map((x) => x.trim().replace(/\s+/g, ' ')).filter(Boolean);
+
+async function savePrankSettings(enabled, names) {
+  if (enabled && !names.length) { toast('Vul eerst minstens één naam in.'); return; }
+  try {
+    const res = await api('prank', { method: 'POST', body: { enabled, names } });
+    if (res.status === 401) { sessionExpired(); return; }
+    if (res.status !== 200) { toast(res.data.error || 'Opslaan mislukt.'); return; }
+    setPrank({ names: prank.names, mine: res.data.mine });
+    ui.prankNames = undefined;
+    render();
+    toast(enabled ? 'De grap staat AAN.' : 'De grap staat uit.');
+  } catch (e) {
+    toast('Geen verbinding: opslaan mislukt.');
+  }
+}
+
 const actions = {
+  'prank-toggle'() {
+    const mine = prank.mine || { enabled: false };
+    return savePrankSettings(!mine.enabled, parseNames($('#prank-names').value));
+  },
+
+  'prank-save'() {
+    const mine = prank.mine || { enabled: false };
+    return savePrankSettings(mine.enabled, parseNames($('#prank-names').value));
+  },
+
   tab(el) {
     ui.tab = el.dataset.tab;
     render();
@@ -838,8 +925,11 @@ const actions = {
   inc(el) {
     const g = openGame();
     if (!g) return;
-    addDamage(g, el.dataset.p, el.dataset.t, Number(el.dataset.n));
-    if (navigator.vibrate) navigator.vibrate(12);
+    const amount = Number(el.dataset.n);
+    const half = prankApplies(el.dataset.p);
+    addDamage(g, el.dataset.p, el.dataset.t, half ? amount / 2 : amount);
+    if (half) toast(`Admin-regel: ${amount} schade telt als ${fmtNum(amount / 2)}`);
+    if (navigator.vibrate) navigator.vibrate(half ? [12, 60, 12] : 12);
     save();
     render();
   },
@@ -847,7 +937,7 @@ const actions = {
   dec(el) {
     const g = openGame();
     if (!g) return;
-    removeDamage(g, el.dataset.p, el.dataset.t);
+    removeDamage(g, el.dataset.p, el.dataset.t, prankApplies(el.dataset.p) ? 0.5 : 1);
     save();
     render();
   },
@@ -966,6 +1056,7 @@ document.addEventListener('click', (e) => {
 document.addEventListener('input', (e) => {
   if (e.target.id === 'new-name') ui.newName = e.target.value;
   if (e.target.name === 'identifier') ui.authUser = e.target.value;
+  if (e.target.id === 'prank-names') ui.prankNames = e.target.value;
 });
 
 document.addEventListener('submit', async (e) => {
