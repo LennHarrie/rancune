@@ -6,8 +6,6 @@
    ====================================================================== */
 
 /* ---------- Configuratie ---------- */
-const STORE_KEY = 'rancune.v1';
-
 const TYPES = [
   { id: 'normal',    label: 'Gewoon',    lethal: null },
   { id: 'commander', label: 'Commander', lethal: 21 },
@@ -26,6 +24,10 @@ const LEVELS = [
 const BAR_MAX = 80; // score waarbij de balk vol is
 
 const OUTCOMES = { won: 'Gewonnen', lost: 'Verloren', stopped: 'Gestopt' };
+
+const API = 'api/index.php';
+const SYNC_RETRY_MS = 15000;
+const REFRESH_MIN_MS = 60000; // minimaal zo lang tussen twee verversingen vanaf de server
 
 /* ---------- Hulpjes ---------- */
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -47,35 +49,36 @@ function isValid(d) {
         && typeof e.n === 'number' && e.n > 0 && typeOf(e.type)));
 }
 
-function load() {
+const lsGet = (key) => {
   try {
-    const raw = localStorage.getItem(STORE_KEY);
-    if (raw) {
-      const d = JSON.parse(raw);
-      if (isValid(d)) return d;
-    }
-  } catch (e) { /* kapotte of geblokkeerde opslag: begin leeg */ }
-  return { v: 1, players: [], games: [] };
-}
+    const raw = localStorage.getItem(key);
+    return raw ? JSON.parse(raw) : null;
+  } catch (e) { return null; }
+};
+const lsSet = (key, value) => {
+  try { localStorage.setItem(key, JSON.stringify(value)); return true; } catch (e) { return false; }
+};
+const lsDel = (key) => { try { localStorage.removeItem(key); } catch (e) { /* geblokkeerd */ } };
 
-function save() {
-  try {
-    localStorage.setItem(STORE_KEY, JSON.stringify(db));
-  } catch (e) {
-    toast('Opslaan mislukt – is je opslag vol?');
-  }
-}
+// De server is leidend; lokaal staat een kopie per account (zodat de app ook zonder bereik werkt)
+// plus de lijst met wijzigingen die nog niet online staan.
+const LS = {
+  last: 'rancune.last',
+  settings: 'rancune.settings',
+  data: (uid) => `rancune.data.${uid}`,
+  pending: (uid) => `rancune.pending.${uid}`,
+};
 
-let db = load();
-const ui = { tab: 'game', picked: null, newName: '' };
+let db = { players: [], games: [] };
+const ui = { tab: 'game', picked: null, newName: '', sync: 'idle', syncMsg: '', authUser: '' };
 
 /* ---------- Instellingen en scherm aanhouden ---------- */
-// Instellingen staan in dezelfde opslag, dus ze zitten ook in de back-up.
-// Oudere data zonder instellingen krijgt de standaardwaarden.
+// Voorkeuren van dit toestel; ze horen niet bij het account en gaan dus niet online.
 const settings = () => {
-  if (!db.settings) db.settings = { keepAwake: true };
-  return db.settings;
+  const s = lsGet(LS.settings);
+  return { keepAwake: true, ...(s || {}) };
 };
+const setSetting = (key, value) => lsSet(LS.settings, { ...settings(), [key]: value });
 
 let wakeLock = null;
 let wakeLockPending = false;
@@ -83,7 +86,7 @@ let wakeLockPending = false;
 /** Houdt het scherm aan zolang er een potje open staat (en de schakelaar aan is). */
 async function syncWakeLock() {
   if (!('wakeLock' in navigator)) return;
-  const want = settings().keepAwake && !!openGame() && document.visibilityState === 'visible';
+  const want = settings().keepAwake && auth.status === 'in' && !!openGame() && document.visibilityState === 'visible';
   if (want && !wakeLock && !wakeLockPending) {
     wakeLockPending = true;
     try {
@@ -176,7 +179,301 @@ function computeStats() {
   return [...map.values()];
 }
 
+/* ---------- Account en online synchronisatie ---------- */
+const auth = { status: 'loading', user: null, expiresAt: 0, error: '', busy: false, expired: false };
+const SYNC_BATCH = 100;
+
+async function api(action, { method = 'GET', body } = {}) {
+  const res = await fetch(`${API}?action=${action}`, {
+    method,
+    credentials: 'same-origin',
+    cache: 'no-store',
+    headers: body ? { 'Content-Type': 'application/json' } : {},
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  let data = {};
+  try { data = await res.json(); } catch (e) { /* geen JSON, bijvoorbeeld een serverfout */ }
+  return { status: res.status, data };
+}
+
+// Wijzigingen die nog niet op de server staan. Elke wijziging krijgt een volgnummer, zodat een
+// wijziging tijdens het versturen niet per ongeluk als "klaar" wordt afgevinkt.
+const emptyPending = () => ({ seq: 0, players: {}, games: {}, delPlayers: [], delGames: [] });
+let pending = emptyPending();
+let snapshot = new Map(); // 'p:<id>' / 'g:<id>' -> JSON zoals laatst gezien, om wijzigingen te herkennen
+const pendingCount = () => Object.keys(pending.players).length + Object.keys(pending.games).length
+  + pending.delPlayers.length + pending.delGames.length;
+
+function loadPending(uid) {
+  const p = lsGet(LS.pending(uid));
+  const obj = (v) => (v && typeof v === 'object' && !Array.isArray(v) ? v : {});
+  const arr = (v) => (Array.isArray(v) ? v.filter((x) => typeof x === 'string') : []);
+  if (!p) return emptyPending();
+  return {
+    seq: Number(p.seq) || 0, players: obj(p.players), games: obj(p.games),
+    delPlayers: arr(p.delPlayers), delGames: arr(p.delGames),
+  };
+}
+
+function rebuildSnapshot() {
+  snapshot = new Map();
+  db.players.forEach((p) => snapshot.set(`p:${p.id}`, JSON.stringify(p)));
+  db.games.forEach((g) => snapshot.set(`g:${g.id}`, JSON.stringify(g)));
+}
+
+/** Vergelijkt de huidige gegevens met de laatst geziene stand en noteert wat er nieuw, gewijzigd of weg is. */
+function markChanges() {
+  const seen = new Set();
+  const check = (prefix, item, bucket, delList) => {
+    const key = `${prefix}:${item.id}`;
+    const json = JSON.stringify(item);
+    seen.add(key);
+    if (snapshot.get(key) === json) return;
+    snapshot.set(key, json);
+    pending[bucket][item.id] = ++pending.seq;
+    pending[delList] = pending[delList].filter((id) => id !== item.id);
+  };
+  db.players.forEach((p) => check('p', p, 'players', 'delPlayers'));
+  db.games.forEach((g) => check('g', g, 'games', 'delGames'));
+  [...snapshot.keys()].forEach((key) => {
+    if (seen.has(key)) return;
+    snapshot.delete(key);
+    const id = key.slice(2);
+    const [bucket, delList] = key[0] === 'p' ? ['players', 'delPlayers'] : ['games', 'delGames'];
+    delete pending[bucket][id];
+    if (!pending[delList].includes(id)) pending[delList].push(id);
+  });
+}
+
+function persistLocal() {
+  if (!auth.user) return;
+  const ok = lsSet(LS.data(auth.user.id), db) && lsSet(LS.pending(auth.user.id), pending);
+  if (!ok) toast('Opslaan op dit toestel mislukt.');
+}
+
+/** Wordt na elke wijziging aangeroepen: lokaal bewaren en online zetten. */
+function save() {
+  if (!auth.user) return;
+  markChanges();
+  persistLocal();
+  scheduleFlush(300);
+}
+
+let flushTimer = null;
+let retryTimer = null;
+let flushPromise = null;
+let flushAgain = false;
+let lastPull = 0;
+
+const scheduleFlush = (delay) => { clearTimeout(flushTimer); flushTimer = setTimeout(flush, delay); };
+const scheduleRetry = () => { clearTimeout(retryTimer); retryTimer = setTimeout(refresh, SYNC_RETRY_MS); };
+
+function setSync(state, msg = '') {
+  if (ui.sync === state && ui.syncMsg === msg) return;
+  ui.sync = state;
+  ui.syncMsg = msg;
+  if (auth.status === 'in') render();
+}
+
+function flush() {
+  if (flushPromise) { flushAgain = true; return flushPromise; }
+  flushPromise = doFlush().finally(() => {
+    flushPromise = null;
+    if (flushAgain) { flushAgain = false; scheduleFlush(0); }
+  });
+  return flushPromise;
+}
+
+async function doFlush() {
+  if (auth.status !== 'in' || !auth.user) return;
+  if (!pendingCount()) { setSync('idle'); return; }
+
+  const take = (obj) => Object.fromEntries(Object.entries(obj).slice(0, SYNC_BATCH));
+  const sent = {
+    players: take(pending.players),
+    games: take(pending.games),
+    delPlayers: pending.delPlayers.slice(0, SYNC_BATCH * 4),
+    delGames: pending.delGames.slice(0, SYNC_BATCH * 4),
+  };
+  const pick = (list, ids) => Object.keys(ids).map((id) => list.find((x) => x.id === id)).filter(Boolean);
+
+  let res = null;
+  try {
+    res = await api('sync', {
+      method: 'POST',
+      body: {
+        players: pick(db.players, sent.players),
+        games: pick(db.games, sent.games),
+        deletePlayers: sent.delPlayers,
+        deleteGames: sent.delGames,
+      },
+    });
+  } catch (e) { /* geen verbinding */ }
+
+  if (!res || res.status >= 500) { setSync('offline'); scheduleRetry(); return; }
+  if (res.status === 401) { sessionExpired(); return; }
+  if (res.status !== 200) { setSync('error', res.data.error || 'Onbekende fout.'); return; }
+
+  Object.entries(sent.players).forEach(([id, seq]) => { if (pending.players[id] === seq) delete pending.players[id]; });
+  Object.entries(sent.games).forEach(([id, seq]) => { if (pending.games[id] === seq) delete pending.games[id]; });
+  pending.delPlayers = pending.delPlayers.filter((id) => !sent.delPlayers.includes(id));
+  pending.delGames = pending.delGames.filter((id) => !sent.delGames.includes(id));
+  persistLocal();
+  setSync('idle');
+  if (pendingCount()) flushAgain = true;
+}
+
+/** Voegt de serverlijst en de lokale, nog niet verstuurde wijzigingen samen (lokaal wint). */
+function mergeList(serverList, localList, pend, dels) {
+  const out = serverList.filter((x) => !dels.includes(x.id));
+  const index = new Map(out.map((x, i) => [x.id, i]));
+  Object.keys(pend).forEach((id) => {
+    const local = localList.find((x) => x.id === id);
+    if (!local) return;
+    if (index.has(id)) out[index.get(id)] = local;
+    else { index.set(id, out.length); out.push(local); }
+  });
+  return out;
+}
+
+async function pull() {
+  let res;
+  try { res = await api('data'); } catch (e) { setSync('offline'); scheduleRetry(); return; }
+  if (res.status === 401) { sessionExpired(); return; }
+  if (res.status !== 200 || !isValid(res.data)) {
+    if (res.status >= 500) { setSync('offline'); scheduleRetry(); } else setSync('error', 'Gegevens ophalen is mislukt.');
+    return;
+  }
+  lastPull = Date.now();
+  db = {
+    players: mergeList(res.data.players, db.players, pending.players, pending.delPlayers),
+    games: mergeList(res.data.games, db.games, pending.games, pending.delGames).sort((a, b) => a.start - b.start),
+  };
+  rebuildSnapshot();
+  persistLocal();
+  ui.sync = 'idle';
+  ui.syncMsg = '';
+  render();
+}
+
+/** Eerst wat lokaal nog open staat versturen, dan de actuele stand van de server ophalen. */
+async function refresh() {
+  if (auth.status !== 'in') return;
+  await flush();
+  if (auth.status === 'in') await pull();
+}
+
+function sessionExpired() {
+  if (auth.status !== 'in') return;
+  auth.status = 'out';
+  auth.expired = true;
+  auth.error = '';
+  closeSheet();
+  render();
+}
+
+async function enterSession(user, expiresAt, { offline = false } = {}) {
+  auth.user = user;
+  auth.expiresAt = expiresAt;
+  auth.status = 'in';
+  auth.expired = false;
+  auth.error = '';
+  auth.busy = false;
+  lsSet(LS.last, { user, expiresAt });
+
+  const cached = lsGet(LS.data(user.id));
+  db = cached && isValid(cached) ? { players: cached.players, games: cached.games } : { players: [], games: [] };
+  pending = loadPending(user.id);
+  rebuildSnapshot();
+  ui.picked = null;
+  ui.sync = offline ? 'offline' : 'idle';
+  ui.syncMsg = '';
+  render();
+  if (offline) scheduleRetry(); else await refresh();
+}
+
+function showLogin(expired) {
+  auth.status = 'out';
+  auth.expired = expired;
+  render();
+}
+
+async function boot() {
+  const last = lsGet(LS.last);
+  let res = null;
+  try { res = await api('me'); } catch (e) { /* geen verbinding */ }
+
+  if (res && res.status === 200) { await enterSession(res.data.user, res.data.expiresAt); return; }
+  if (res && res.status === 401) { showLogin(!!last); return; }
+
+  // Server niet bereikbaar: werk door als de laatst bekende sessie nog geldig is.
+  if (last && last.user && Date.now() < last.expiresAt * 1000) {
+    await enterSession(last.user, last.expiresAt, { offline: true });
+  } else {
+    auth.error = 'De server is niet bereikbaar. Probeer het later opnieuw.';
+    showLogin(!!last);
+  }
+}
+
+async function logout() {
+  await flush();
+  try {
+    await api('logout', { method: 'POST', body: {} });
+  } catch (e) {
+    toast('Geen verbinding: uitloggen is niet gelukt.');
+    return;
+  }
+  const uid = auth.user && auth.user.id;
+  lsDel(LS.last);
+  // Wijzigingen die nog niet online staan blijven bewaard tot dit account weer inlogt.
+  if (uid && !pendingCount()) { lsDel(LS.data(uid)); lsDel(LS.pending(uid)); }
+  auth.user = null;
+  auth.status = 'out';
+  auth.expired = false;
+  auth.error = '';
+  db = { players: [], games: [] };
+  pending = emptyPending();
+  snapshot = new Map();
+  Object.assign(ui, { tab: 'game', picked: null, newName: '', sync: 'idle', syncMsg: '' });
+  closeSheet();
+  render();
+}
+
 /* ---------- Schermen ---------- */
+function viewLogin() {
+  const notice = auth.expired
+    ? '<p class="notice">Je sessie is verlopen. Log opnieuw in om verder te gaan; wat nog niet online stond blijft op dit toestel bewaard.</p>'
+    : '';
+  return `
+    <div class="auth">
+      <img class="logo" src="icons/icon-192.png" alt="" width="72" height="72">
+      <h1>Rancune Counter</h1>
+      <p class="muted">Log in met je Exploding Kraken-account. Je blijft 24 uur ingelogd.</p>
+      ${notice}
+      <form id="auth-form" novalidate>
+        <label>E-mailadres
+          <input name="identifier" type="text" inputmode="email" autocomplete="username" autocapitalize="none"
+                 spellcheck="false" maxlength="180" required value="${esc(ui.authUser || '')}">
+        </label>
+        <label>Wachtwoord
+          <input name="password" type="password" autocomplete="current-password" maxlength="200" required>
+        </label>
+        ${auth.error ? `<p class="error" role="alert">${esc(auth.error)}</p>` : ''}
+        <button class="primary wide" type="submit" ${auth.busy ? 'disabled' : ''}>${auth.busy ? 'Bezig…' : 'Inloggen'}</button>
+      </form>
+    </div>`;
+}
+
+function syncBanner() {
+  const n = pendingCount();
+  if (ui.sync === 'offline') {
+    return `<p class="banner warn">Geen verbinding. Je werkt verder op dit toestel${n
+      ? `; ${n} wijziging${n === 1 ? ' wordt' : 'en worden'} opgeslagen zodra je weer online bent` : ''}.</p>`;
+  }
+  if (ui.sync === 'error') return `<p class="banner err">Online opslaan lukt niet: ${esc(ui.syncMsg)}</p>`;
+  return '';
+}
+
 function viewGame() {
   const g = openGame();
   return g ? viewActiveGame(g) : viewNewGame();
@@ -322,8 +619,20 @@ function viewMore() {
   const awakeNote = 'wakeLock' in navigator
     ? 'Het scherm gaat niet uit zolang er een potje bezig is. Kost wat extra batterij.'
     : 'Deze browser ondersteunt dit niet; het scherm gaat gewoon uit volgens je telefooninstellingen.';
+  const n = pendingCount();
+  const syncLine = ui.sync === 'offline' ? 'Geen verbinding.'
+    : ui.sync === 'error' ? `Online opslaan lukt niet: ${esc(ui.syncMsg)}`
+      : n ? 'Bezig met opslaan…' : 'Alles staat online.';
+  const until = new Date(auth.expiresAt * 1000)
+    .toLocaleString('nl-NL', { weekday: 'long', hour: '2-digit', minute: '2-digit' });
   return `
     <h1>Meer</h1>
+    <section class="card">
+      <h3>Account</h3>
+      <p>Ingelogd als <b>${esc(auth.user.name)}</b></p>
+      <p class="muted">Je sessie verloopt ${until}. ${syncLine}${n ? ` (${n} wijziging${n === 1 ? '' : 'en'} wachten)` : ''}</p>
+      <button data-a="logout">Uitloggen</button>
+    </section>
     <section class="card">
       <div class="switch-row">
         <div>
@@ -335,7 +644,7 @@ function viewMore() {
     </section>
     <section class="card">
       <h3>Back-up</h3>
-      <p class="muted">Alles staat alleen op deze telefoon. Maak af en toe een back-up, dan raak je niets kwijt als je browsergegevens wist.</p>
+      <p class="muted">Je gegevens staan online bij je account. Een back-up is optioneel, bijvoorbeeld om te bewaren of mee te nemen.</p>
       <div class="btns">
         <button data-a="export">Back-up opslaan</button>
         <button data-a="import">Back-up terugzetten</button>
@@ -349,8 +658,14 @@ function viewMore() {
 }
 
 function render() {
+  document.body.classList.toggle('locked', auth.status !== 'in');
+  if (auth.status !== 'in') {
+    $('#view').innerHTML = auth.status === 'loading' ? '<div class="empty">Laden…</div>' : viewLogin();
+    syncWakeLock();
+    return;
+  }
   const views = { game: viewGame, rancune: viewRancune, history: viewHistory, more: viewMore };
-  $('#view').innerHTML = views[ui.tab]();
+  $('#view').innerHTML = syncBanner() + views[ui.tab]();
   document.querySelectorAll('#tabs button').forEach((b) => {
     b.classList.toggle('on', b.dataset.tab === ui.tab);
     b.setAttribute('aria-current', b.dataset.tab === ui.tab ? 'page' : 'false');
@@ -456,7 +771,7 @@ function toast(msg) {
 
 /* ---------- Back-up ---------- */
 function exportData() {
-  const blob = new Blob([JSON.stringify(db, null, 2)], { type: 'application/json' });
+  const blob = new Blob([JSON.stringify({ v: 1, players: db.players, games: db.games }, null, 2)], { type: 'application/json' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
   a.download = `rancune-backup-${new Date().toISOString().slice(0, 10)}.json`;
@@ -602,17 +917,18 @@ const actions = {
   },
 
   'toggle-awake'() {
-    settings().keepAwake = !settings().keepAwake;
-    save();
+    setSetting('keepAwake', !settings().keepAwake);
     render();
   },
+
+  logout,
 
   export: exportData,
   import() { $('#import-file').click(); },
 
   'import-confirm'() {
     if (!pendingImport) return;
-    db = pendingImport;
+    db = { players: pendingImport.players, games: pendingImport.games };
     pendingImport = null;
     ui.picked = null;
     save();
@@ -622,12 +938,12 @@ const actions = {
   },
 
   reset() {
-    confirmSheet('Alles wissen?', 'Alle spelers, potjes en statistieken worden verwijderd. Dit kan niet ongedaan worden gemaakt – maak eerst een back-up.',
+    confirmSheet('Alles wissen?', 'Alle spelers, potjes en statistieken worden verwijderd, ook online. Dit kan niet ongedaan worden gemaakt – maak eerst een back-up.',
       'reset-confirm', 'Ja, alles wissen');
   },
 
   'reset-confirm'() {
-    db = { v: 1, players: [], games: [], settings: settings() };
+    db = { players: [], games: [] };
     ui.picked = null;
     save();
     closeSheet();
@@ -649,6 +965,34 @@ document.addEventListener('click', (e) => {
 
 document.addEventListener('input', (e) => {
   if (e.target.id === 'new-name') ui.newName = e.target.value;
+  if (e.target.name === 'identifier') ui.authUser = e.target.value;
+});
+
+document.addEventListener('submit', async (e) => {
+  if (e.target.id !== 'auth-form') return;
+  e.preventDefault();
+  if (auth.busy) return;
+  const form = new FormData(e.target);
+  const identifier = String(form.get('identifier') || '').trim();
+  const password = String(form.get('password') || '');
+  ui.authUser = identifier;
+  if (!identifier || !password) {
+    auth.error = 'Vul je e-mailadres en wachtwoord in.';
+    render();
+    return;
+  }
+  auth.busy = true;
+  auth.error = '';
+  render();
+  try {
+    const res = await api('login', { method: 'POST', body: { identifier, password } });
+    if (res.status === 200) { await enterSession(res.data.user, res.data.expiresAt); return; }
+    auth.error = res.data.error || 'Inloggen is niet gelukt.';
+  } catch (err) {
+    auth.error = 'Geen verbinding. Probeer het opnieuw.';
+  }
+  auth.busy = false;
+  render();
 });
 
 document.addEventListener('keydown', (e) => {
@@ -664,7 +1008,20 @@ $('#import-file').addEventListener('change', (e) => {
 });
 
 /* ---------- Start ---------- */
+// Terug online, of de app komt weer in beeld: wijzigingen versturen en de stand van de server ophalen.
+window.addEventListener('online', () => refresh());
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState !== 'visible' || auth.status !== 'in') return;
+  if (Date.now() >= auth.expiresAt * 1000) { sessionExpired(); return; }
+  if (pendingCount() || Date.now() - lastPull > REFRESH_MIN_MS) refresh();
+});
+// De login verloopt na 24 uur, ook als de app open blijft staan of geen verbinding heeft.
+setInterval(() => {
+  if (auth.status === 'in' && Date.now() >= auth.expiresAt * 1000) sessionExpired();
+}, 30000);
+
 render();
+boot();
 
 if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
 if ('serviceWorker' in navigator) {

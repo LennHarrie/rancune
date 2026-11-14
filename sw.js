@@ -1,6 +1,6 @@
 // Service worker: houdt de app beschikbaar zonder internet.
 // Netwerk eerst (zodat updates meteen binnenkomen), cache als terugval.
-const CACHE = 'rancune-v1';
+const CACHE = 'rancune-v2';
 const ASSETS = [
   './',
   'index.html',
@@ -26,6 +26,8 @@ self.addEventListener('activate', (e) => {
 
 self.addEventListener('fetch', (e) => {
   if (e.request.method !== 'GET') return;
+  // De API gaat altijd rechtstreeks naar het netwerk: nooit oude of andermans gegevens uit de cache.
+  if (new URL(e.request.url).pathname.includes('/api/')) return;
   e.respondWith(
     fetch(e.request)
       .then((res) => {

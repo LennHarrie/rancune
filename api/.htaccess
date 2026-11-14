@@ -1,0 +1,10 @@
+# De configuratie en het schema mogen nooit rechtstreeks opgevraagd worden.
+<FilesMatch "^(config(\.sample)?\.php|lib\.php|schema\.sql)$">
+  <IfModule mod_authz_core.c>
+    Require all denied
+  </IfModule>
+  <IfModule !mod_authz_core.c>
+    Order allow,deny
+    Deny from all
+  </IfModule>
+</FilesMatch>

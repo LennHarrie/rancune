@@ -51,7 +51,8 @@ button.primary { background: var(--accent); color: #fff; font-weight: 700; }
 button.danger { background: #3a1d28; color: #ff9a9a; }
 button.wide { width: 100%; margin-top: 16px; }
 
-input[type=text] {
+input[type=text],
+input[type=password] {
   font: inherit;
   color: inherit;
   width: 100%;
@@ -61,7 +62,8 @@ input[type=text] {
   border-radius: 12px;
   background: var(--card);
 }
-input[type=text]:focus { outline: 2px solid var(--commander); border-color: transparent; }
+input[type=text]:focus,
+input[type=password]:focus { outline: 2px solid var(--commander); border-color: transparent; }
 
 .card {
   display: block;
@@ -171,6 +173,21 @@ input[type=text]:focus { outline: 2px solid var(--commander); border-color: tran
 }
 .switch.on { background: var(--accent); border-color: var(--accent); }
 .switch.on i { transform: translateX(24px); background: #fff; }
+
+/* ---------- Inloggen en meldingen ---------- */
+body.locked #tabs { display: none; }
+body.locked main { padding-bottom: 32px; }
+
+.auth { padding-top: 24px; }
+.auth .logo { display: block; border-radius: 18px; margin-bottom: 12px; }
+.auth form { margin-top: 16px; }
+.auth label { display: block; margin-bottom: 14px; font-size: .85rem; color: var(--muted); }
+.auth label input { display: block; margin-top: 6px; font-size: 1rem; color: var(--text); }
+
+.notice, .error, .banner { padding: 10px 12px; border-radius: 12px; font-size: .9rem; margin: 0 0 12px; }
+.notice { background: #3b3115; color: #ffd166; }
+.error, .banner.err { background: #3a1d28; color: #ff9a9a; }
+.banner.warn { background: #3b3115; color: #ffd166; }
 
 /* ---------- Tabbalk ---------- */
 #tabs {
