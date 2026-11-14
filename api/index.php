@@ -63,7 +63,9 @@ function health(): never
         }
     } catch (Throwable $e) {
         error_log("rancune health ($stage): " . $e->getMessage());
-        fail(503, "Controle mislukt bij: $stage");
+        // Alleen het type fout (bijv. 1045 = verkeerd wachtwoord), nooit gegevens of de volledige melding.
+        $kind = get_class($e) . ($e instanceof PDOException ? ' ' . $e->getCode() : '');
+        fail(503, "Controle mislukt bij: $stage [$kind]");
     }
     respond(200, ['ok' => true]);
 }

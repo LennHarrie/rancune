@@ -63,6 +63,12 @@ function db(): PDO
     static $pdo = null;
     if ($pdo === null) {
         $c = cfg();
+        foreach (['db_host', 'db_name', 'db_user'] as $key) {
+            if (!isset($c[$key]) || $c[$key] === '') {
+                fail(500, "Databaseinstelling '$key' ontbreekt. Staat die in het config.php van het toernooi (ek_config), of vul je hem zelf in api/config.php?");
+            }
+        }
+        $c['db_pass'] = (string) ($c['db_pass'] ?? '');
         $pdo = new PDO(
             "mysql:host={$c['db_host']};dbname={$c['db_name']};charset=utf8mb4",
             $c['db_user'],
