@@ -451,7 +451,7 @@ function viewLogin() {
       <p class="muted">Log in met je Exploding Kraken-account. Je blijft 24 uur ingelogd.</p>
       ${notice}
       <form id="auth-form" novalidate>
-        <label>E-mailadres
+        <label>E-mailadres of gebruikersnaam (beheerder)
           <input name="identifier" type="text" inputmode="email" autocomplete="username" autocapitalize="none"
                  spellcheck="false" maxlength="180" required value="${esc(ui.authUser || '')}">
         </label>
