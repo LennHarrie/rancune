@@ -33,21 +33,24 @@ De **rancune-score** is het gemiddelde aantal punten per potje. De gewichten sta
 
 ## Installeren op STRATO
 
-Rancune draait in dezelfde database als de toernooisite. Vereist PHP 8.1 of nieuwer en HTTPS.
+Rancune draait in dezelfde database als de toernooisite. Vereist PHP 8.1 of nieuwer en HTTPS. Updaten gaat net als bij het toernooi: een push naar `main` zet de bestanden via GitHub Actions (`.github/workflows/deploy.yml`) op STRATO.
 
-1. **Database:** open phpMyAdmin, kies de database van het toernooi en importeer `api/schema.sql`. Dat maakt vier tabellen aan die met `rancune_` beginnen; er wordt niets van het toernooi aangepast.
-2. **Uploaden:** zet alle bestanden (behalve `.git`) via FTP in een map op hetzelfde domein, bijvoorbeeld `/toernooi/rancune/`.
-3. **Config:** kopieer `api/config.sample.php` naar `api/config.php`. Staat de map in `/toernooi/rancune/` en het toernooi in `/toernooi/`, dan is dit genoeg:
+**Eenmalig:**
+
+1. **Map:** Rancune krijgt een eigen map op het domein, **niet** de hoofdmap van de website (daar staat de toernooisite al). Bijvoorbeeld `/toernooi/rancune/`.
+2. **Secrets:** voeg in GitHub bij *Settings → Secrets and variables → Actions* van deze repo vier secrets toe: `SFTP_HOST`, `SFTP_USERNAME` en `SFTP_PASSWORD` (dezelfde als bij het toernooi) en `SFTP_PATH` (de **volledige serverpad van de Rancune-map**, dus niet dat van het toernooi).
+3. **Database:** open phpMyAdmin, kies de database van het toernooi en importeer `api/schema.sql`. Dat maakt vier tabellen aan die met `rancune_` beginnen; er wordt niets van het toernooi aangepast.
+4. **Config:** maak op de server `api/config.php` aan (kopie van `api/config.sample.php`). Staat de map in `/toernooi/rancune/` en het toernooi in `/toernooi/`, dan is dit genoeg:
 
    ```php
    'ek_config' => __DIR__ . '/../../config.php',
    ```
 
-   Anders vul je de `db_*`-gegevens zelf in (dezelfde als in het toernooi-`config.php`).
-4. **Testen:** open `https://jouwdomein.nl/toernooi/rancune/` en log in met je toernooi-account.
-5. **Telefoon:** open de link in Chrome en kies **⋮ → App installeren**.
+   Anders vul je de `db_*`-gegevens zelf in (dezelfde als in het toernooi-`config.php`). Dit bestand staat in `.gitignore`, komt dus nooit in GitHub en wordt door de deploy niet overschreven.
+5. **Deployen:** merge naar `main`. Open daarna `https://jouwdomein.nl/toernooi/rancune/` en log in met je toernooi-account.
+6. **Telefoon:** open de link in Chrome en kies **⋮ → App installeren**.
 
-`api/config.php` staat in `.gitignore` en komt dus nooit in GitHub.
+**Daarna:** wijzigingen naar `main` pushen is genoeg. Alleen bij nieuwe databasetabellen moet je het SQL-bestand zelf in phpMyAdmin draaien.
 
 ## Lokaal draaien
 
