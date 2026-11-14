@@ -1,6 +1,10 @@
 <?php
 declare(strict_types=1);
 
+// Alles wat per ongeluk wordt uitgevoerd vóór het antwoord (een BOM of tekst aan het begin van
+// config.php) wordt opgevangen en weggegooid, zodat het JSON-antwoord altijd schoon blijft.
+ob_start();
+
 require __DIR__ . '/lib.php';
 
 // Kleine API: index.php?action=me|login|logout|data|sync
@@ -13,6 +17,10 @@ try {
                 'user'      => ['id' => $s['user_id'], 'name' => $s['name']],
                 'expiresAt' => $s['expires_at'],
             ]);
+
+        case 'health':
+            requireMethod('GET');
+            health();
 
         case 'login':
             requireMethod('POST');
@@ -39,6 +47,25 @@ try {
 } catch (Throwable $e) {
     error_log('rancune api: ' . $e);
     fail(500, 'Er ging iets mis op de server.');
+}
+
+/** Controleert configuratie, databaseverbinding en tabellen. Geeft alleen de mislukte stap terug. */
+function health(): never
+{
+    $stage = 'databaseverbinding (api/config.php)';
+    try {
+        $pdo = db();
+        $stage = 'tabel users van het toernooi';
+        $pdo->query('SELECT 1 FROM users LIMIT 1');
+        foreach (['rancune_sessions', 'rancune_players', 'rancune_games', 'rancune_attempts'] as $table) {
+            $stage = "tabel $table (api/schema.sql)";
+            $pdo->query("SELECT 1 FROM $table LIMIT 1");
+        }
+    } catch (Throwable $e) {
+        error_log("rancune health ($stage): " . $e->getMessage());
+        fail(503, "Controle mislukt bij: $stage");
+    }
+    respond(200, ['ok' => true]);
 }
 
 /**

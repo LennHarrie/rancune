@@ -13,6 +13,9 @@ const DUMMY_HASH     = '$2y$10$jpdxD30znbBUOnJ6A2t4e.7JYOiOpqlc/ZXVgxkKbEFHdR9eo
 
 function respond(int $status, array $body): never
 {
+    while (ob_get_level() > 0) {
+        ob_end_clean();
+    }
     http_response_code($status);
     header('Content-Type: application/json; charset=utf-8');
     header('Cache-Control: no-store');
@@ -34,6 +37,9 @@ function cfg(): array
             fail(500, 'Server niet geconfigureerd (api/config.php ontbreekt).');
         }
         $config = require $file;
+        if (!is_array($config)) {
+            fail(500, 'api/config.php is geen geldig configuratiebestand: het moet beginnen met <?php en een lijst teruggeven (return [ ... ];).');
+        }
         // Optioneel: databasegegevens overnemen uit het config.php van Exploding Kraken.
         $ek = (string) ($config['ek_config'] ?? '');
         if ($ek !== '') {
@@ -41,6 +47,9 @@ function cfg(): array
                 fail(500, 'ek_config in api/config.php wijst naar een bestand dat niet bestaat.');
             }
             $ekConfig = require $ek;
+            if (!is_array($ekConfig)) {
+                fail(500, 'Het config.php van het toernooi (ek_config) geeft geen lijst met instellingen terug.');
+            }
             foreach (['db_host', 'db_name', 'db_user', 'db_pass'] as $key) {
                 $config[$key] = $ekConfig[$key] ?? null;
             }
